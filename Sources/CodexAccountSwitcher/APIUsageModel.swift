@@ -83,6 +83,11 @@ final class APIUsageModel: ObservableObject {
         }
     }
 
+    func syncAllCreditBalances() async {
+        guard !isDemo else { return }
+        await syncConnectedWebBilling()
+    }
+
     private func syncConnectedWebBilling() async {
         for (id, connection) in configuration.webBilling where connection.enabled {
             guard !Task.isCancelled else { return }

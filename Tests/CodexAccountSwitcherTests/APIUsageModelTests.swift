@@ -106,13 +106,19 @@ struct APIUsageModelTests {
     }
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["SWITCHER_TEST_KEYCHAIN"] == "1"))
-    func keychainRoundTripWithAnIsolatedSyntheticItem() throws {
+    func keychainRoundTripWithAnIsolatedSyntheticItem() async throws {
         let keys = APIKeychain()
         let id = "org-synthetic-keychain-\(UUID().uuidString)"
         defer { try? keys.delete(organizationID: id) }
         #expect(try keys.read(organizationID: id) == nil)
         try keys.save("synthetic-keychain-fixture-only", organizationID: id)
         #expect(try keys.read(organizationID: id) == "synthetic-keychain-fixture-only")
+        var interactionBefore = DarwinBoolean(false)
+        #expect(SecKeychainGetUserInteractionAllowed(&interactionBefore) == errSecSuccess)
+        #expect(try await keys.readForRefresh(organizationID: id, allowInteraction: false) == "synthetic-keychain-fixture-only")
+        var interactionAfter = DarwinBoolean(false)
+        #expect(SecKeychainGetUserInteractionAllowed(&interactionAfter) == errSecSuccess)
+        #expect(interactionAfter.boolValue == interactionBefore.boolValue)
         try keys.save("synthetic-replacement-only", organizationID: id)
         #expect(try keys.read(organizationID: id) == "synthetic-replacement-only")
         try keys.delete(organizationID: id)

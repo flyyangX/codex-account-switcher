@@ -243,6 +243,8 @@ struct APIUsageView: View {
 
     private var overview: some View {
         VStack(alignment: .leading, spacing: 20) {
+            APIAccountSummaryView(model: model, browser: model.webBilling)
+            Text("\(title) · 账单明细").font(.headline).padding(.top, 4)
             balanceCard
             if let id = model.organization?.id { APIWebBillingStatusView(browser: model.webBilling, organizationID: id) }
             periodBar

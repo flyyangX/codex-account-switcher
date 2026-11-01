@@ -165,6 +165,9 @@ extension APIKeyStoring {
 }
 
 struct APIKeychain: APIKeyStoring, Sendable {
+    // The legacy login keychain uses a process-wide interaction setting.
+    // Serialize our operations so a silent read cannot suppress an explicit save/read.
+    private static let accessLock = NSLock()
     @MainActor func readForRefresh(organizationID: String, allowInteraction: Bool) async throws -> String? {
         // Security may wait for the login keychain / system authorization. Keep AppKit responsive.
         try await Task.detached(priority: .userInitiated) {
@@ -182,6 +185,18 @@ struct APIKeychain: APIKeyStoring, Sendable {
         try readItem(organizationID: organizationID, allowInteraction: true)
     }
     private func readItem(organizationID: String, allowInteraction: Bool) throws -> String? {
+        Self.accessLock.lock()
+        defer { Self.accessLock.unlock() }
+        var previousInteraction = DarwinBoolean(true)
+        if !allowInteraction {
+            let status = SecKeychainGetUserInteractionAllowed(&previousInteraction)
+            guard status == errSecSuccess else { throw APIKeychainError(status: status) }
+            let changed = SecKeychainSetUserInteractionAllowed(false)
+            guard changed == errSecSuccess else { throw APIKeychainError(status: changed) }
+        }
+        defer {
+            if !allowInteraction { SecKeychainSetUserInteractionAllowed(previousInteraction.boolValue) }
+        }
         var query = query(organizationID)
         query[kSecUseAuthenticationUI as String] = allowInteraction ? kSecUseAuthenticationUIAllow : kSecUseAuthenticationUIFail
         query[kSecReturnData as String] = true
@@ -195,6 +210,8 @@ struct APIKeychain: APIKeyStoring, Sendable {
         return key
     }
     func save(_ key: String, organizationID: String) throws {
+        Self.accessLock.lock()
+        defer { Self.accessLock.unlock() }
         let attributes = [kSecValueData as String: Data(key.utf8)]
         let status = SecItemUpdate(query(organizationID) as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound {
@@ -206,6 +223,8 @@ struct APIKeychain: APIKeyStoring, Sendable {
         } else if status != errSecSuccess { throw APIKeychainError(status: status) }
     }
     func delete(organizationID: String) throws {
+        Self.accessLock.lock()
+        defer { Self.accessLock.unlock() }
         let status = SecItemDelete(query(organizationID) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw APIKeychainError(status: status) }
     }
@@ -214,7 +233,7 @@ struct APIKeychain: APIKeyStoring, Sendable {
 struct APIKeychainError: LocalizedError {
     let status: OSStatus
     var errorDescription: String? {
-        if status == errSecInteractionNotAllowed || status == errSecAuthFailed || status == errSecUserCanceled {
+        if status == errSecInteractionNotAllowed || status == errSecInteractionRequired || status == errSecAuthFailed || status == errSecUserCanceled {
             return "密钥需要本机授权；自动刷新已暂停读取，不会弹窗。请主动点击“授权密钥”。"
         }
         return "钥匙串操作失败（\(status)），请检查登录钥匙串。"
