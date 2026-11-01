@@ -1,5 +1,7 @@
 # System design
 
+Fork extension: [API usage and credit reminders](api-usage.md) adds a separate billing domain and macOS Keychain service for Admin Keys. Existing non-goals below describe the account-switching MVP and do not exclude this explicitly requested API feature. Codex profile credentials keep their original storage behavior.
+
 ## 1. Overview
 
 Codex Account Switcher is a native macOS menu-bar application that manages multiple local Codex authentication snapshots.

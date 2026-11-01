@@ -1,3 +1,5 @@
+> This fork integrates an API dashboard into the original macOS menu-bar app: organization usage/costs, web-synced credits, account totals, and expiry reminders. Build the full local app with `./scripts/package-integrated-app.sh`; the separate API-only test build remains available. See [the feature guide](docs/api-usage.md) (Simplified Chinese). This is not an upstream release; upstream attribution and project information follow.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/account-switcher-logo-white.png">

@@ -7,9 +7,28 @@ struct SwitcherApp: App {
     @NSApplicationDelegateAdaptor(SwitcherAppDelegate.self) private var appDelegate
 
     var body: some Scene {
+        Window("API 用量与赠额", id: "api-usage") {
+            APIUsageWindowRoot(delegate: appDelegate)
+        }
+        .defaultSize(width: 1180, height: 860)
+
+        Window("Codex 账号", id: "accounts") {
+            if APIAppMode.usesIsolatedStartup {
+                APIMonitorMenu(model: appDelegate.apiUsage)
+            } else {
+                MenuBarPopover(model: appDelegate.model, updater: appDelegate.updater,
+                               tiboForecast: appDelegate.tiboForecast)
+            }
+        }
+        .windowResizability(.contentSize)
+
         MenuBarExtra {
-            MenuBarPopover(model: appDelegate.model, updater: appDelegate.updater,
-                           tiboForecast: appDelegate.tiboForecast)
+            if APIAppMode.usesIsolatedStartup {
+                APIMonitorMenu(model: appDelegate.apiUsage)
+            } else {
+                MenuBarPopover(model: appDelegate.model, updater: appDelegate.updater,
+                               tiboForecast: appDelegate.tiboForecast)
+            }
         } label: {
             MenuBarStatusLabel(model: appDelegate.model, updater: appDelegate.updater)
         }
@@ -17,6 +36,36 @@ struct SwitcherApp: App {
         .commands {
             QuitApplicationCommands(model: appDelegate.model)
         }
+    }
+}
+
+private struct APIUsageWindowRoot: View {
+    let delegate: SwitcherAppDelegate
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        APIUsageView(model: delegate.apiUsage)
+            .onAppear {
+                delegate.reopenAPIWindow = { openWindow(id: "api-usage") }
+            }
+    }
+}
+
+private struct APIMonitorMenu: View {
+    @ObservedObject var model: APIUsageModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Codex API Monitor", systemImage: "chart.bar.xaxis").font(.headline)
+            Text(model.organization?.name ?? "尚未连接 API 组织").font(.caption).foregroundStyle(.secondary)
+            Button("API 用量与赠额") {
+                openWindow(id: "api-usage")
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            Divider()
+            Button("退出") { NSApp.terminate(nil) }.keyboardShortcut("q", modifiers: .command)
+        }.padding(16).frame(width: 260, alignment: .leading)
     }
 }
 

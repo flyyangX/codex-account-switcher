@@ -10,7 +10,8 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @preconc
     @Published private(set) var canCheckForUpdates = false
     @Published private(set) var isInstalling = false
     @Published private(set) var lastError: String?
-    var automaticallyChecks: Bool { controller?.updater.automaticallyChecksForUpdates ?? true }
+    var isLocalIntegratedBuild: Bool { APIAppMode.isLocalIntegratedBuild }
+    var automaticallyChecks: Bool { controller?.updater.automaticallyChecksForUpdates ?? !isLocalIntegratedBuild }
 
     var accountOperationInProgress = false {
         didSet {
@@ -30,6 +31,7 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @preconc
     }
 
     func start() {
+        guard !APIAppMode.usesIsolatedStartup, !isLocalIntegratedBuild else { return }
         guard controller == nil else { return }
         let controller = SPUStandardUpdaterController(
             startingUpdater: false, updaterDelegate: self, userDriverDelegate: self

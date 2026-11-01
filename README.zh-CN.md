@@ -1,3 +1,5 @@
+> 本 fork 正在开发 Mac 独立版 **Codex API Monitor**：官方组织用量／费用、Keychain 管理凭据与赠额到期提醒。使用方式、数据边界和本地打包见 [API 功能说明](docs/api-usage.md)。这是 fork 的开发功能，未作为上游正式版本发布。以下保留上游项目介绍与作者信息。
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/account-switcher-logo-white.png">

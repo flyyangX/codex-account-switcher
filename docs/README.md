@@ -1,5 +1,7 @@
 # Documentation
 
+- [Fork: Mac API usage, costs and credit reminders](api-usage.md)
+
 - [Official project identity and primary sources](project-identity.md)
 
 This directory defines the MVP for Codex Account Switcher.

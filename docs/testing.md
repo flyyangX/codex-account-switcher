@@ -1,5 +1,7 @@
 # Testing
 
+The fork's independent API billing feature is described in [api-usage.md](api-usage.md), including synthetic-only tests and outstanding real connection / notification acceptance. The account-profile Keychain exclusion below applies to Codex profile credentials; API Admin Keys use a separate macOS Keychain service.
+
 ## 1. Philosophy
 
 The MVP test suite should prove two things:
