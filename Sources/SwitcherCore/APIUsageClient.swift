@@ -35,22 +35,30 @@ public struct APIUsageClient: Sendable {
     public init(transport: any APIUsageTransport = APIUsageURLTransport()) { self.transport = transport }
 
     public func costs(organization: APIOrganization, key: String, range: APIQueryRange) async throws -> APICostSummary {
-        let result: ([CostRow], APIQueryRange?) = try await fetch(path: "costs", groups: ["project_id", "line_item"],
+        let result: ([Bucket<CostRow>], APIQueryRange?) = try await fetch(path: "costs", groups: ["project_id", "line_item"],
                                             organization: organization, key: key, range: range)
-        return APICostSummary(lines: try result.0.map { row in
-            guard let value = row.amount?.value, !value.isNaN,
-                  let currency = row.amount?.currency, currency.count == 3,
-                  organization.projectID == nil || row.project_id == organization.projectID
-            else { throw APIUsageError.malformedResponse }
-            return APICostLine(amount: value, currency: currency, projectID: row.project_id, lineItem: row.line_item)
-        }, bucketRange: result.1)
+        var lines: [APICostLine] = []
+        let days = try result.0.map { bucket in
+            let dailyLines = try bucket.results.map { row in
+                guard let value = row.amount?.value, !value.isNaN,
+                      let currency = row.amount?.currency, currency.count == 3,
+                      organization.projectID == nil || row.project_id == organization.projectID
+                else { throw APIUsageError.malformedResponse }
+                return APICostLine(amount: value, currency: currency, projectID: row.project_id, lineItem: row.line_item)
+            }
+            lines += dailyLines
+            return APICostDay(start: Date(timeIntervalSince1970: Double(bucket.start_time)),
+                              end: Date(timeIntervalSince1970: Double(bucket.end_time)),
+                              totals: APICostSummary(lines: dailyLines).totals)
+        }
+        return APICostSummary(lines: lines, bucketRange: result.1, days: days.sorted { $0.start < $1.start })
     }
 
     public func usage(organization: APIOrganization, key: String, range: APIQueryRange) async throws -> APIUsageSummary {
-        let result: ([UsageRow], APIQueryRange?) = try await fetch(path: "usage/completions", groups: ["model", "project_id"],
+        let result: ([Bucket<UsageRow>], APIQueryRange?) = try await fetch(path: "usage/completions", groups: ["model", "project_id"],
                                               organization: organization, key: key, range: range)
         var models: [String: APIModelUsage] = [:]
-        for row in result.0 {
+        for row in result.0.flatMap(\.results) {
             guard row.input_tokens >= 0, row.output_tokens >= 0, row.num_model_requests >= 0,
                   (row.input_cached_tokens ?? 0) >= 0,
                   organization.projectID == nil || row.project_id == organization.projectID
@@ -75,14 +83,14 @@ public struct APIUsageClient: Sendable {
     }
 
     private func fetch<Row: Decodable & Sendable>(path: String, groups: [String], organization: APIOrganization,
-                                                 key: String, range: APIQueryRange) async throws -> ([Row], APIQueryRange?) {
+                                                 key: String, range: APIQueryRange) async throws -> ([Bucket<Row>], APIQueryRange?) {
         try organization.validate()
         guard range.isValid else { throw APIUsageError.rangeUnavailable }
         guard !key.isEmpty else { throw APIUsageError.missingCredential }
         var page: String?
         var seenPages = Set<String>()
         var seenBuckets = Set<Int64>()
-        var rows: [Row] = []
+        var buckets: [Bucket<Row>] = []
         var bucketStart: Int64?
         var bucketEnd: Int64?
         repeat {
@@ -125,7 +133,7 @@ public struct APIUsageClient: Sendable {
                 guard seenBuckets.insert(bucket.start_time).inserted else { throw APIUsageError.pagination }
                 bucketStart = min(bucketStart ?? bucket.start_time, bucket.start_time)
                 bucketEnd = max(bucketEnd ?? bucket.end_time, bucket.end_time)
-                rows += bucket.results
+                buckets.append(bucket)
             }
             if response.has_more {
                 guard let next = response.next_page, !next.isEmpty,
@@ -137,7 +145,7 @@ public struct APIUsageClient: Sendable {
         let coverage = bucketStart.flatMap { start in bucketEnd.map {
             APIQueryRange(start: Date(timeIntervalSince1970: Double(start)), end: Date(timeIntervalSince1970: Double($0)))
         } }
-        return (rows, coverage)
+        return (buckets, coverage)
     }
 
     /// Some official zero amounts use a Decimal128 exponent outside Swift's range
@@ -171,12 +179,12 @@ public struct APIUsageClient: Sendable {
     }
 }
 
-private struct Page<Row: Decodable>: Decodable {
+private struct Page<Row: Decodable & Sendable>: Decodable {
     var data: [Bucket<Row>]
     var has_more: Bool
     var next_page: String?
 }
-private struct Bucket<Row: Decodable>: Decodable {
+private struct Bucket<Row: Decodable & Sendable>: Decodable, Sendable {
     var start_time: Int64
     var end_time: Int64
     var results: [Row]

@@ -10,7 +10,7 @@ struct SwitcherApp: App {
         Window("API 用量与赠额", id: "api-usage") {
             APIUsageWindowRoot(delegate: appDelegate)
         }
-        .defaultSize(width: 940, height: 820)
+        .defaultSize(width: 1180, height: 860)
 
         MenuBarExtra {
             if APIAppMode.usesIsolatedStartup {

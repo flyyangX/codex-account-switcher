@@ -12,6 +12,26 @@ struct APIUsageTests {
                         cycleStart: range.start, cycleEnd: range.end)
     }
 
+    @Test func periodPresetsUseUTCAndHandleMonthBoundaries() throws {
+        let formatter = ISO8601DateFormatter()
+        let now = try #require(formatter.date(from: "2032-03-01T01:30:00Z"))
+        let expectations: [(APIPeriodPreset, String, String)] = [
+            (.today, "2032-03-01T00:00:00Z", "2032-03-01T01:30:00Z"),
+            (.last7Days, "2032-02-24T00:00:00Z", "2032-03-01T01:30:00Z"),
+            (.last30Days, "2032-02-01T00:00:00Z", "2032-03-01T01:30:00Z"),
+            (.thisMonth, "2032-03-01T00:00:00Z", "2032-03-01T01:30:00Z"),
+            (.lastMonth, "2032-02-01T00:00:00Z", "2032-03-01T00:00:00Z")]
+        for (preset, start, end) in expectations {
+            let value = APIPeriodSelection(preset: preset).range(organization: organization, now: now)
+            #expect(value.start == formatter.date(from: start))
+            #expect(value.end == formatter.date(from: end))
+        }
+        let custom = APIQueryRange(start: now.addingTimeInterval(-86_400), end: now.addingTimeInterval(86_400))
+        #expect(APIPeriodSelection(preset: .custom, customRange: custom).range(organization: organization, now: now).end == now)
+        let legacy = try JSONDecoder().decode(APICostSummary.self, from: Data(#"{"lines":[]}"#.utf8))
+        #expect(legacy.days == nil)
+    }
+
     @Test func costsPaginationDecimalCurrencyAndAttribution() async throws {
         let transport = QueueTransport(responses: [
             (200, page(start: 1_000, end: 2_000, rows: """
@@ -27,6 +47,11 @@ struct APIUsageTests {
                                                                        key: "synthetic-test-token", range: range)
         #expect(value.totals["USD"] == Decimal(string: "0.25"))
         #expect(value.totals["EUR"] == Decimal(string: "1.25"))
+        #expect(value.days?.count == 2)
+        #expect(value.days?.first?.totals["USD"] == Decimal(string: "0.1"))
+        #expect(value.days?.last?.totals["USD"] == Decimal(string: "0.15"))
+        #expect(value.days?.first?.totals["EUR"] == nil)
+        #expect(value.days?.last?.start == Date(timeIntervalSince1970: 2_000))
         let requests = await transport.requests
         #expect(requests.count == 2)
         #expect(requests[0].httpMethod == "GET")

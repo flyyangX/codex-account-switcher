@@ -45,6 +45,60 @@ public struct APIQueryRange: Codable, Equatable, Sendable {
     }
 }
 
+/// Date filters use UTC calendar days to match the official daily billing buckets.
+public enum APIPeriodPreset: String, Codable, CaseIterable, Sendable {
+    case today, last7Days, last30Days, thisMonth, lastMonth, configured, custom
+    public var title: String {
+        switch self {
+        case .today: "今日"
+        case .last7Days: "近 7 天"
+        case .last30Days: "近 30 天"
+        case .thisMonth: "本月"
+        case .lastMonth: "上月"
+        case .configured: "已设周期"
+        case .custom: "自定义"
+        }
+    }
+}
+
+public struct APIPeriodSelection: Codable, Equatable, Sendable {
+    public var preset: APIPeriodPreset
+    public var customRange: APIQueryRange?
+    public init(preset: APIPeriodPreset, customRange: APIQueryRange? = nil) {
+        self.preset = preset; self.customRange = customRange
+    }
+    public func range(organization: APIOrganization, now: Date) -> APIQueryRange {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let day = calendar.startOfDay(for: now)
+        let month = calendar.dateInterval(of: .month, for: now)!
+        switch preset {
+        case .today: return .today(now: now)
+        case .last7Days, .last30Days:
+            let days = preset == .last7Days ? 6 : 29
+            return APIQueryRange(start: calendar.date(byAdding: .day, value: -days, to: day)!, end: now)
+        case .thisMonth: return APIQueryRange(start: month.start, end: now)
+        case .lastMonth:
+            return APIQueryRange(start: calendar.date(byAdding: .month, value: -1, to: month.start)!, end: month.start)
+        case .configured:
+            return APIQueryRange(start: organization.cycleStart, end: min(organization.cycleEnd, now))
+        case .custom:
+            guard let customRange else { return APIQueryRange(start: now, end: now) }
+            return APIQueryRange(start: customRange.start, end: min(customRange.end, now))
+        }
+    }
+}
+
+public struct APICostDay: Codable, Equatable, Sendable, Identifiable {
+    public var start: Date
+    public var end: Date
+    public var totals: [String: Decimal]
+    public var id: Date { start }
+    public init(start: Date, end: Date, totals: [String: Decimal]) {
+        self.start = start; self.end = end; self.totals = totals
+    }
+}
+
 public struct APICostLine: Codable, Equatable, Sendable {
     public var amount: Decimal
     public var currency: String
@@ -61,8 +115,9 @@ public struct APICostLine: Codable, Equatable, Sendable {
 public struct APICostSummary: Codable, Equatable, Sendable {
     public var lines: [APICostLine]
     public var bucketRange: APIQueryRange?
-    public init(lines: [APICostLine], bucketRange: APIQueryRange? = nil) {
-        self.lines = lines; self.bucketRange = bucketRange
+    public var days: [APICostDay]?
+    public init(lines: [APICostLine], bucketRange: APIQueryRange? = nil, days: [APICostDay]? = nil) {
+        self.lines = lines; self.bucketRange = bucketRange; self.days = days
     }
     public var totals: [String: Decimal] {
         lines.reduce(into: [:]) { $0[$1.currency, default: 0] += $1.amount }
@@ -112,9 +167,9 @@ public struct APIUsageSnapshot: Codable, Equatable, Sendable {
     public var today: APIReport<APICostSummary>
     public var cycle: APIReport<APICostSummary>
     public var usage: APIReport<APIUsageSummary>
-    public init(organization: APIOrganization, now: Date) {
+    public init(organization: APIOrganization, now: Date, period: APIPeriodSelection? = nil) {
         self.organization = organization
-        let range = APIQueryRange(start: organization.cycleStart, end: min(organization.cycleEnd, now))
+        let range = (period ?? APIPeriodSelection(preset: .configured)).range(organization: organization, now: now)
         today = APIReport(range: .today(now: now))
         cycle = APIReport(range: range)
         usage = APIReport(range: range)

@@ -34,6 +34,32 @@ final class APIUsageModel: ObservableObject {
         configuration.grants.filter { $0.organizationID == organization?.id }.sorted { $0.expiresAt < $1.expiresAt }
     }
 
+    var creditBalance: APICreditBalance? { configuration.creditBalances[organization?.id ?? ""] }
+
+    func saveCreditBalance(_ balance: APICreditBalance) throws {
+        guard let organization else { throw APIUsageError.invalidConfiguration }
+        try balance.validate()
+        var next = configuration; next.creditBalances[organization.id] = balance
+        if !isDemo { try store.saveConfiguration(next) }
+        configuration = next
+    }
+
+    var period: APIPeriodSelection {
+        configuration.periods[organization?.id ?? ""] ?? APIPeriodSelection(preset: .configured)
+    }
+
+    func setPeriod(_ selection: APIPeriodSelection) throws {
+        guard let organization else { return }
+        let range = selection.range(organization: organization, now: Date())
+        guard range.isValid, range.end.timeIntervalSince(range.start) <= 366 * 86_400 else {
+            throw APIUsageError.rangeUnavailable
+        }
+        var next = configuration; next.periods[organization.id] = selection
+        if !isDemo { try store.saveConfiguration(next) }
+        invalidateRefresh(); configuration = next
+        if isDemo { updateDemoSnapshot() } else { refresh() }
+    }
+
     func start() {
         guard !isDemo, timerTask == nil else { return }
         notifications = APICreditNotifications()
@@ -132,6 +158,8 @@ final class APIUsageModel: ObservableObject {
         var next = configuration
         next.organizations.removeAll { $0.id == organization.id }
         next.grants.removeAll { $0.organizationID == organization.id }
+        next.periods.removeValue(forKey: organization.id)
+        next.creditBalances.removeValue(forKey: organization.id)
         next.selectedID = next.organizations.first?.id
         for index in next.accounts.indices where next.accounts[index].organizationID == organization.id {
             next.accounts[index].organizationID = nil
@@ -163,6 +191,7 @@ final class APIUsageModel: ObservableObject {
         guard var organization else { return }
         organization.cycleStart = grant.issuedAt; organization.cycleEnd = grant.expiresAt
         try saveOrganization(organization, key: "")
+        try setPeriod(APIPeriodSelection(preset: .configured))
     }
 
     func setReminders(_ enabled: Bool) async {
@@ -226,9 +255,10 @@ final class APIUsageModel: ObservableObject {
         isRefreshing = true
         refreshTask = Task { [weak self] in
             guard let self else { return }
-            var next = APIUsageSnapshot(organization: organization, now: Date())
+            var next = APIUsageSnapshot(organization: organization, now: Date(), period: period)
             do {
-                guard let key = try keys.read(organizationID: organization.id) else { throw APIUsageError.missingCredential }
+                guard let key = try await keys.readForRefresh(organizationID: organization.id) else { throw APIUsageError.missingCredential }
+                try Task.checkCancellation()
                 let old = snapshot
                 let todayRange = next.today.range
                 let cycleRange = next.cycle.range
@@ -280,14 +310,36 @@ final class APIUsageModel: ObservableObject {
         configuration.grants = [APICreditGrant(organizationID: org.id, amount: 50, currency: "USD",
                                               issuedAt: org.cycleStart, expiresAt: org.cycleEnd,
                                               source: "合成演示账单", verifiedAt: now)]
-        var snapshot = APIUsageSnapshot(organization: org, now: now)
-        snapshot.today.value = APICostSummary(lines: [APICostLine(amount: Decimal(string: "0.123456")!, currency: "USD",
+        configuration.accounts = [APITrackedAccount(name: "Demo workspace", organizationID: org.id,
+                                                    credentialNote: "合成演示", creditNote: "合成演示赠额")]
+        configuration.creditBalances[org.id] = APICreditBalance(totalCredits: 50, remainingCredits: 38, currency: "USD",
+                                                              isInitialGrantOnly: false, source: "合成演示账单", verifiedAt: now)
+        configuration.periods[org.id] = APIPeriodSelection(preset: .last7Days)
+        updateDemoSnapshot()
+    }
+
+    private func updateDemoSnapshot() {
+        guard let org = organization else { return }
+        let now = Date()
+        var snapshot = APIUsageSnapshot(organization: org, now: now, period: period)
+        var days: [APICostDay] = []
+        var date = snapshot.cycle.range.start
+        let samples = ["0.42", "0.71", "0.53", "1.18", "0.86", "1.42", "0.63"]
+        while date < snapshot.cycle.range.end {
+            let amount = Decimal(string: samples[days.count % samples.count])!
+            days.append(APICostDay(start: date, end: date.addingTimeInterval(86_400), totals: ["USD": amount]))
+            date = date.addingTimeInterval(86_400)
+        }
+        snapshot.today.value = APICostSummary(lines: [APICostLine(amount: Decimal(string: "0.63")!, currency: "USD",
                                                                  projectID: "proj_demo", lineItem: "synthetic-model, input_tokens")])
-        snapshot.cycle.value = APICostSummary(lines: [APICostLine(amount: Decimal(string: "4.56789")!, currency: "USD",
-                                                                 projectID: "proj_demo", lineItem: "synthetic-model, input_tokens")])
-        snapshot.usage.value = APIUsageSummary(models: [APIModelUsage(model: "synthetic-model", projectID: "proj_demo",
-                                                                   requests: 42, inputTokens: 120_000, outputTokens: 8_000,
-                                                                   cachedInputTokens: 40_000)])
+        snapshot.cycle.value = APICostSummary(lines: days.map {
+            APICostLine(amount: $0.totals["USD"]!, currency: "USD", projectID: "proj_demo", lineItem: "synthetic-model, input_tokens")
+        }, bucketRange: APIQueryRange(start: days.first!.start, end: days.last!.end), days: days)
+        snapshot.usage.value = APIUsageSummary(models: [
+            APIModelUsage(model: "demo-reasoning", projectID: "proj_demo", requests: 142,
+                          inputTokens: 820_000, outputTokens: 180_000, cachedInputTokens: 340_000),
+            APIModelUsage(model: "demo-fast", projectID: "proj_demo", requests: 86,
+                          inputTokens: 240_000, outputTokens: 65_000, cachedInputTokens: 100_000)])
         snapshot.today.fetchedAt = now; snapshot.cycle.fetchedAt = now; snapshot.usage.fetchedAt = now
         snapshots = [snapshot]
     }

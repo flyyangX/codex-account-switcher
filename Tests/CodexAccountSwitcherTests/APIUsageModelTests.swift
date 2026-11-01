@@ -7,6 +7,57 @@ import SwitcherCore
 
 @MainActor
 struct APIUsageModelTests {
+    @Test func periodSelectionPersistsPerOrganizationAndFailedChangeKeepsActualRange() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "api-period-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = APIUsageStore(directory: root)
+        let transport = ModelTransport()
+        let model = APIUsageModel(store: store, keys: MemoryKeys(), client: APIUsageClient(transport: transport))
+        try model.saveOrganization(makeOrganization(), key: "sk-admin-synthetic-fixture-only")
+        try model.setPeriod(APIPeriodSelection(preset: .lastMonth))
+        await model.refreshAndWait()
+        let old = try #require(model.snapshot)
+        #expect(old.cycle.range == model.period.range(organization: makeOrganization(), now: Date()))
+        #expect(try store.loadConfiguration().periods["org-synthetic"]?.preset == .lastMonth)
+        await transport.setCostStatus(403)
+        try model.setPeriod(APIPeriodSelection(preset: .last7Days))
+        await model.refreshAndWait()
+        #expect(model.snapshot?.cycle.range == old.cycle.range)
+        #expect(model.snapshot?.cycle.error != nil)
+        #expect(model.snapshot?.usage.range.start != old.usage.range.start)
+        var other = makeOrganization(); other.id = "org-other"
+        try model.saveOrganization(other, key: "sk-admin-synthetic-fixture-only")
+        await model.refreshAndWait()
+        #expect(model.period.preset == .configured)
+        model.select("org-synthetic")
+        await model.refreshAndWait()
+        #expect(model.period.preset == .last7Days)
+        let invalid = APIQueryRange(start: Date(), end: Date().addingTimeInterval(-86_400))
+        #expect(throws: APIUsageError.rangeUnavailable) {
+            try model.setPeriod(APIPeriodSelection(preset: .custom, customRange: invalid))
+        }
+    }
+
+    @Test func verifiedCreditSnapshotIsIndependentOfCostFiltersAndKeepsUnknownBalance() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "api-credit-snapshot-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = APIUsageStore(directory: root)
+        let model = APIUsageModel(store: store, keys: MemoryKeys(), client: APIUsageClient(transport: ModelTransport()))
+        try model.saveOrganization(makeOrganization(), key: "sk-admin-synthetic-fixture-only")
+        let record = APICreditBalance(totalCredits: 50, remainingCredits: nil, currency: "USD",
+                                     isInitialGrantOnly: true, source: "Synthetic confirmation", verifiedAt: Date(timeIntervalSince1970: 1_900_000_000))
+        try model.saveCreditBalance(record)
+        try model.setPeriod(APIPeriodSelection(preset: .last30Days))
+        await model.refreshAndWait()
+        #expect(model.creditBalance == record)
+        #expect(model.creditBalance?.remainingCredits == nil)
+        #expect(try store.loadConfiguration().creditBalances["org-synthetic"] == record)
+        var invalid = record; invalid.remainingCredits = -1
+        #expect(throws: APIUsageError.invalidGrant) { try model.saveCreditBalance(invalid) }
+        let old = Data(#"{"organizations":[],"grants":[],"remindersEnabled":false}"#.utf8)
+        #expect(try JSONDecoder().decode(APIUsageConfiguration.self, from: old).creditBalances.isEmpty)
+    }
+
     @Test func dateOnlyRemindersUseDaytimeWithoutInventingExpiryTime() throws {
         let account = APITrackedAccount(name: "Synthetic", credentialNote: "", creditNote: "",
                                         expiryDate: "2030-05-10", expiryTimeZone: "Asia/Shanghai")
@@ -140,9 +191,9 @@ struct APIUsageModelTests {
     @Test func productionViewHasUsableMinimumSizeWithSyntheticData() {
         let model = APIUsageModel(demo: true)
         let host = NSHostingController(rootView: APIUsageView(model: model))
-        let size = host.sizeThatFits(in: NSSize(width: 940, height: 820))
-        #expect(size.width >= 820)
-        #expect(size.height >= 650)
+        let size = host.sizeThatFits(in: NSSize(width: 1180, height: 860))
+        #expect(size.width >= 1020)
+        #expect(size.height >= 720)
         #expect(APIUsageFormat.date(Date(timeIntervalSince1970: 0)).contains("08:00:00 +08:00"))
         #expect(APIUsageFormat.parse("2030-05-10T23:59:59+08:00") == APIUsageFormat.parse("2030-05-10T15:59:59Z"))
         #expect(APIUsageFormat.amount(Decimal(string: "0.000000000001")!, currency: "usd") == "USD 0.000000000001")

@@ -59,16 +59,36 @@ struct APINotificationStatus: Codable {
     var pending: [Pending]? = nil
 }
 
+/// A manually verified billing snapshot, never inferred from Costs or a monthly spending limit.
+struct APICreditBalance: Codable, Equatable {
+    var totalCredits: Decimal?
+    var remainingCredits: Decimal?
+    var currency: String
+    var isInitialGrantOnly: Bool
+    var source: String
+    var verifiedAt: Date
+
+    func validate() throws {
+        guard totalCredits != nil || remainingCredits != nil,
+              [totalCredits, remainingCredits].compactMap({ $0 }).allSatisfy({ !$0.isNaN && $0 >= 0 }),
+              currency.count == 3, currency.allSatisfy({ $0.isASCII && $0.isLetter }),
+              !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { throw APIUsageError.invalidGrant }
+    }
+}
+
 struct APIUsageConfiguration: Codable, Equatable {
     var organizations: [APIOrganization] = []
     var selectedID: String?
     var grants: [APICreditGrant] = []
     var remindersEnabled = false
     var accounts: [APITrackedAccount] = []
+    var periods: [String: APIPeriodSelection] = [:]
+    var creditBalances: [String: APICreditBalance] = [:]
 
     init() {}
     private enum CodingKeys: String, CodingKey {
-        case organizations, selectedID, grants, remindersEnabled, accounts
+        case organizations, selectedID, grants, remindersEnabled, accounts, periods, creditBalances
     }
     init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -77,6 +97,8 @@ struct APIUsageConfiguration: Codable, Equatable {
         grants = try values.decodeIfPresent([APICreditGrant].self, forKey: .grants) ?? []
         remindersEnabled = try values.decodeIfPresent(Bool.self, forKey: .remindersEnabled) ?? false
         accounts = try values.decodeIfPresent([APITrackedAccount].self, forKey: .accounts) ?? []
+        periods = try values.decodeIfPresent([String: APIPeriodSelection].self, forKey: .periods) ?? [:]
+        creditBalances = try values.decodeIfPresent([String: APICreditBalance].self, forKey: .creditBalances) ?? [:]
     }
 }
 
@@ -122,12 +144,26 @@ struct APIUsageStore {
 }
 
 protocol APIKeyStoring {
+    @MainActor func readForRefresh(organizationID: String) async throws -> String?
     func read(organizationID: String) throws -> String?
     func save(_ key: String, organizationID: String) throws
     func delete(organizationID: String) throws
 }
 
-struct APIKeychain: APIKeyStoring {
+extension APIKeyStoring {
+    @MainActor func readForRefresh(organizationID: String) async throws -> String? {
+        try read(organizationID: organizationID)
+    }
+}
+
+struct APIKeychain: APIKeyStoring, Sendable {
+    @MainActor func readForRefresh(organizationID: String) async throws -> String? {
+        // Security may wait for the login keychain / system authorization. Keep AppKit responsive.
+        try await Task.detached(priority: .userInitiated) {
+            try self.read(organizationID: organizationID)
+        }.value
+    }
+
     private let service = "com.flyyang.codex-api-monitor.admin-key"
     private func query(_ id: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
