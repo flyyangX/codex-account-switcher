@@ -35,22 +35,22 @@ public struct APIUsageClient: Sendable {
     public init(transport: any APIUsageTransport = APIUsageURLTransport()) { self.transport = transport }
 
     public func costs(organization: APIOrganization, key: String, range: APIQueryRange) async throws -> APICostSummary {
-        let rows: [CostRow] = try await fetch(path: "costs", groups: ["project_id", "line_item"],
+        let result: ([CostRow], APIQueryRange?) = try await fetch(path: "costs", groups: ["project_id", "line_item"],
                                             organization: organization, key: key, range: range)
-        return APICostSummary(lines: try rows.map { row in
+        return APICostSummary(lines: try result.0.map { row in
             guard let value = row.amount?.value, !value.isNaN,
                   let currency = row.amount?.currency, currency.count == 3,
                   organization.projectID == nil || row.project_id == organization.projectID
             else { throw APIUsageError.malformedResponse }
             return APICostLine(amount: value, currency: currency, projectID: row.project_id, lineItem: row.line_item)
-        })
+        }, bucketRange: result.1)
     }
 
     public func usage(organization: APIOrganization, key: String, range: APIQueryRange) async throws -> APIUsageSummary {
-        let rows: [UsageRow] = try await fetch(path: "usage/completions", groups: ["model", "project_id"],
+        let result: ([UsageRow], APIQueryRange?) = try await fetch(path: "usage/completions", groups: ["model", "project_id"],
                                               organization: organization, key: key, range: range)
         var models: [String: APIModelUsage] = [:]
-        for row in rows {
+        for row in result.0 {
             guard row.input_tokens >= 0, row.output_tokens >= 0, row.num_model_requests >= 0,
                   (row.input_cached_tokens ?? 0) >= 0,
                   organization.projectID == nil || row.project_id == organization.projectID
@@ -65,7 +65,7 @@ public struct APIUsageClient: Sendable {
             value.cachedInputTokens = try adding(value.cachedInputTokens, row.input_cached_tokens ?? 0)
             models[id] = value
         }
-        return APIUsageSummary(models: models.values.sorted { $0.id < $1.id })
+        return APIUsageSummary(models: models.values.sorted { $0.id < $1.id }, bucketRange: result.1)
     }
 
     private func adding(_ a: Int64, _ b: Int64) throws -> Int64 {
@@ -75,7 +75,7 @@ public struct APIUsageClient: Sendable {
     }
 
     private func fetch<Row: Decodable & Sendable>(path: String, groups: [String], organization: APIOrganization,
-                                                 key: String, range: APIQueryRange) async throws -> [Row] {
+                                                 key: String, range: APIQueryRange) async throws -> ([Row], APIQueryRange?) {
         try organization.validate()
         guard range.isValid else { throw APIUsageError.rangeUnavailable }
         guard !key.isEmpty else { throw APIUsageError.missingCredential }
@@ -83,6 +83,8 @@ public struct APIUsageClient: Sendable {
         var seenPages = Set<String>()
         var seenBuckets = Set<Int64>()
         var rows: [Row] = []
+        var bucketStart: Int64?
+        var bucketEnd: Int64?
         repeat {
             try Task.checkCancellation()
             var url = URLComponents(string: "https://api.openai.com/v1/organization/\(path)")!
@@ -113,14 +115,16 @@ public struct APIUsageClient: Sendable {
             default: throw APIUsageError.http(status)
             }
             let response: Page<Row>
-            do { response = try JSONDecoder().decode(Page<Row>.self, from: data) }
+            do { response = try JSONDecoder().decode(Page<Row>.self, from: Self.normalizeExponentZeros(data)) }
             catch { throw APIUsageError.malformedResponse }
             for bucket in response.data {
-                guard bucket.start_time >= Int64(range.start.timeIntervalSince1970),
-                      bucket.end_time <= Int64(range.end.timeIntervalSince1970),
+                guard bucket.start_time < Int64(range.end.timeIntervalSince1970),
+                      bucket.end_time > Int64(range.start.timeIntervalSince1970),
                       bucket.start_time < bucket.end_time
                 else { throw APIUsageError.rangeUnavailable }
                 guard seenBuckets.insert(bucket.start_time).inserted else { throw APIUsageError.pagination }
+                bucketStart = min(bucketStart ?? bucket.start_time, bucket.start_time)
+                bucketEnd = max(bucketEnd ?? bucket.end_time, bucket.end_time)
                 rows += bucket.results
             }
             if response.has_more {
@@ -130,7 +134,40 @@ public struct APIUsageClient: Sendable {
                 page = next
             } else { page = nil }
         } while page != nil
-        return rows
+        let coverage = bucketStart.flatMap { start in bucketEnd.map {
+            APIQueryRange(start: Date(timeIntervalSince1970: Double(start)), end: Date(timeIntervalSince1970: Double($0)))
+        } }
+        return (rows, coverage)
+    }
+
+    /// Some official zero amounts use a Decimal128 exponent outside Swift's range
+    /// (e.g. 0E-6176). Normalize numeric zero tokens only; never round nonzero money
+    /// or modify quoted strings. JSONDecoder still validates the resulting JSON.
+    private static func normalizeExponentZeros(_ data: Data) -> Data {
+        let bytes = Array(data)
+        var output = Data(); var index = 0; var inString = false; var escaped = false
+        while index < bytes.count {
+            let byte = bytes[index]
+            if inString {
+                output.append(byte)
+                if escaped { escaped = false }
+                else if byte == 92 { escaped = true }
+                else if byte == 34 { inString = false }
+                index += 1
+            } else if byte == 34 {
+                inString = true; output.append(byte); index += 1
+            } else if byte == 45 || (48...57).contains(byte) {
+                let start = index
+                while index < bytes.count && ![9, 10, 13, 32, 44, 93, 125].contains(bytes[index]) { index += 1 }
+                let token = String(decoding: bytes[start..<index], as: UTF8.self)
+                let parts = token.split(whereSeparator: { $0 == "e" || $0 == "E" })
+                if parts.count == 2,
+                   token.range(of: #"^-?0(?:\.0+)?[eE][+-]?[0-9]+$"#, options: .regularExpression) != nil {
+                    output.append(48)
+                } else { output.append(contentsOf: bytes[start..<index]) }
+            } else { output.append(byte); index += 1 }
+        }
+        return output
     }
 }
 

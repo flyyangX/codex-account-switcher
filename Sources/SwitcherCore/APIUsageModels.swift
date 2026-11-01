@@ -40,7 +40,7 @@ public struct APIQueryRange: Codable, Equatable, Sendable {
     public var isValid: Bool { start < end }
     public static func today(now: Date) -> APIQueryRange {
         var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         return APIQueryRange(start: calendar.startOfDay(for: now), end: now)
     }
 }
@@ -60,7 +60,10 @@ public struct APICostLine: Codable, Equatable, Sendable {
 
 public struct APICostSummary: Codable, Equatable, Sendable {
     public var lines: [APICostLine]
-    public init(lines: [APICostLine]) { self.lines = lines }
+    public var bucketRange: APIQueryRange?
+    public init(lines: [APICostLine], bucketRange: APIQueryRange? = nil) {
+        self.lines = lines; self.bucketRange = bucketRange
+    }
     public var totals: [String: Decimal] {
         lines.reduce(into: [:]) { $0[$1.currency, default: 0] += $1.amount }
     }
@@ -84,7 +87,10 @@ public struct APIModelUsage: Codable, Equatable, Sendable, Identifiable {
 
 public struct APIUsageSummary: Codable, Equatable, Sendable {
     public var models: [APIModelUsage]
-    public init(models: [APIModelUsage]) { self.models = models }
+    public var bucketRange: APIQueryRange?
+    public init(models: [APIModelUsage], bucketRange: APIQueryRange? = nil) {
+        self.models = models; self.bucketRange = bucketRange
+    }
 }
 
 /// Each endpoint has its own status, so denied Costs never hides successful Usage.

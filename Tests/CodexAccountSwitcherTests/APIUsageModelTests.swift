@@ -7,6 +7,36 @@ import SwitcherCore
 
 @MainActor
 struct APIUsageModelTests {
+    @Test func dateOnlyRemindersUseDaytimeWithoutInventingExpiryTime() throws {
+        let account = APITrackedAccount(name: "Synthetic", credentialNote: "", creditNote: "",
+                                        expiryDate: "2030-05-10", expiryTimeZone: "Asia/Shanghai")
+        let now = try #require(APIUsageFormat.parse("2030-05-01T00:00:00+08:00"))
+        let reminders = APIDateOnlyReminderPlanner.reminders(accounts: [account], now: now)
+        #expect(reminders.map(\.fireAt) == [APIUsageFormat.parse("2030-05-07T09:00:00+08:00")!,
+                                           APIUsageFormat.parse("2030-05-09T09:00:00+08:00")!])
+        #expect(reminders.map(\.expiryDate) == ["2030-05-10", "2030-05-10"])
+        #expect(APIDateOnlyReminderPlanner.parse("2030-02-30", timeZone: "Asia/Shanghai") == nil)
+        #expect(APIDateOnlyReminderPlanner.reminders(accounts: [account], now: reminders.last!.fireAt).isEmpty)
+    }
+
+    @Test func pendingAccountsPersistWithoutInventingOrganizationsOrCredentials() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "api-accounts-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = APIUsageStore(directory: root)
+        let keys = MemoryKeys()
+        let model = APIUsageModel(store: store, keys: keys)
+        for name in ["Synthetic A", "Synthetic B", "Synthetic C"] {
+            try model.registerAccount(name: name, credentialNote: "Project key only", creditNote: "Expiry unknown")
+        }
+        try model.registerAccount(name: "Synthetic A", credentialNote: "Updated", creditNote: "Expiry unknown")
+        #expect(model.configuration.accounts.count == 3)
+        #expect(model.configuration.accounts.allSatisfy { $0.organizationID == nil })
+        #expect(keys.values.isEmpty)
+        #expect(try store.loadConfiguration().accounts.count == 3)
+        let old = Data(#"{"organizations":[],"grants":[],"remindersEnabled":false}"#.utf8)
+        #expect(try JSONDecoder().decode(APIUsageConfiguration.self, from: old).accounts.isEmpty)
+    }
+
     @Test(.enabled(if: ProcessInfo.processInfo.environment["SWITCHER_TEST_KEYCHAIN"] == "1"))
     func keychainRoundTripWithAnIsolatedSyntheticItem() throws {
         let keys = APIKeychain()

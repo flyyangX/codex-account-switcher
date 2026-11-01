@@ -72,7 +72,7 @@ struct APIUsageTests {
                 try await APIUsageClient(transport: transport).costs(organization: organization, key: "synthetic-test-token", range: range)
             }
         }
-        let transport = QueueTransport(responses: [(200, page(start: 0, end: 86_400, rows: ""))])
+        let transport = QueueTransport(responses: [(200, page(start: 3_000, end: 86_400, rows: ""))])
         await #expect(throws: APIUsageError.rangeUnavailable) {
             try await APIUsageClient(transport: transport).costs(organization: organization, key: "synthetic-test-token", range: range)
         }
@@ -98,16 +98,29 @@ struct APIUsageTests {
         }
     }
 
-    @Test func shanghaiDayRangeAndCacheStaleness() throws {
+    @Test func utcBillingDayRangeAndCacheStaleness() throws {
         let now = try #require(ISO8601DateFormatter().date(from: "2030-05-10T16:00:01Z"))
         let today = APIQueryRange.today(now: now)
-        #expect(today.start == ISO8601DateFormatter().date(from: "2030-05-10T16:00:00Z"))
+        #expect(today.start == ISO8601DateFormatter().date(from: "2030-05-10T00:00:00Z"))
         #expect(today.end == now)
         let report = APIReport<APICostSummary>(range: today, value: APICostSummary(lines: []), fetchedAt: now)
         #expect(!report.isStale(now: now.addingTimeInterval(1_799)))
         #expect(report.isStale(now: now.addingTimeInterval(1_800)))
         var failed = report; failed.error = "permission denied"
         #expect(failed.isStale(now: now))
+    }
+
+    @Test func exponentZeroAndAlignedBucketsRemainExactWithoutRewritingStrings() async throws {
+        let transport = QueueTransport(responses: [(200, page(start: 0, end: 86_400, rows: """
+        {"amount":{"value":0E-6176,"currency":"usd"},"project_id":"proj_synthetic","line_item":"literal 0E-6176"},
+        {"amount":{"value":0.000000000001,"currency":"usd"},"project_id":"proj_synthetic"}
+        """))])
+        let summary = try await APIUsageClient(transport: transport).costs(organization: organization,
+                                                                         key: "synthetic-test-token", range: range)
+        #expect(summary.totals["USD"] == Decimal(string: "0.000000000001"))
+        #expect(summary.lines.first?.lineItem == "literal 0E-6176")
+        #expect(summary.bucketRange?.start == Date(timeIntervalSince1970: 0))
+        #expect(summary.bucketRange?.end == Date(timeIntervalSince1970: 86_400))
     }
 
     @Test func grantsUseHalfOpenIntervalsAndExactExpiryReminders() throws {

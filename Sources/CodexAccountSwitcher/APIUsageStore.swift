@@ -2,11 +2,82 @@ import Foundation
 import Security
 import SwitcherCore
 
+struct APITrackedAccount: Codable, Equatable, Identifiable {
+    var id = UUID()
+    var name: String
+    var organizationID: String?
+    var credentialNote: String
+    var creditNote: String
+    var expiryDate: String? = nil
+    var expiryTimeZone: String? = nil
+}
+
+struct APIDateOnlyReminder: Equatable {
+    var id: String
+    var accountID: UUID
+    var fireAt: Date
+    var expiryDate: String
+    var days: Int
+}
+
+enum APIDateOnlyReminderPlanner {
+    static func parse(_ date: String, timeZone: String) -> Date? {
+        guard let zone = TimeZone(identifier: timeZone) else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = zone
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.isLenient = false
+        guard let value = formatter.date(from: date), formatter.string(from: value) == date else { return nil }
+        return value
+    }
+    static func reminders(accounts: [APITrackedAccount], now: Date) -> [APIDateOnlyReminder] {
+        accounts.flatMap { account -> [APIDateOnlyReminder] in
+            guard let date = account.expiryDate, let zone = account.expiryTimeZone,
+                  let day = parse(date, timeZone: zone), let timeZone = TimeZone(identifier: zone) else { return [] }
+            var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timeZone
+            return [3, 1].compactMap { days in
+                guard let target = calendar.date(byAdding: .day, value: -days, to: day),
+                      let fire = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: target), fire > now else { return nil }
+                return APIDateOnlyReminder(id: "api-credit.date-only.\(account.id).\(date).\(days)",
+                                            accountID: account.id, fireAt: fire, expiryDate: date, days: days)
+            }
+        }.sorted { $0.fireAt < $1.fireAt }
+    }
+}
+
+struct APINotificationStatus: Codable {
+    struct Pending: Codable {
+        var id: String
+        var fireAt: Date?
+    }
+    var checkedAt: Date
+    var authorization: String
+    var pendingIDs: [String]
+    var error: String?
+    var pending: [Pending]? = nil
+}
+
 struct APIUsageConfiguration: Codable, Equatable {
     var organizations: [APIOrganization] = []
     var selectedID: String?
     var grants: [APICreditGrant] = []
     var remindersEnabled = false
+    var accounts: [APITrackedAccount] = []
+
+    init() {}
+    private enum CodingKeys: String, CodingKey {
+        case organizations, selectedID, grants, remindersEnabled, accounts
+    }
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        organizations = try values.decodeIfPresent([APIOrganization].self, forKey: .organizations) ?? []
+        selectedID = try values.decodeIfPresent(String.self, forKey: .selectedID)
+        grants = try values.decodeIfPresent([APICreditGrant].self, forKey: .grants) ?? []
+        remindersEnabled = try values.decodeIfPresent(Bool.self, forKey: .remindersEnabled) ?? false
+        accounts = try values.decodeIfPresent([APITrackedAccount].self, forKey: .accounts) ?? []
+    }
 }
 
 /// This document deliberately has no credential field and no relationship to auth.json.
@@ -22,6 +93,7 @@ struct APIUsageStore {
     func saveConfiguration(_ value: APIUsageConfiguration) throws { try write(value, name: "configuration.json") }
     func loadSnapshots() throws -> [APIUsageSnapshot] { try read("cache.json", default: []) }
     func saveSnapshots(_ value: [APIUsageSnapshot]) throws { try write(value, name: "cache.json") }
+    func saveNotificationStatus(_ value: APINotificationStatus) throws { try write(value, name: "notification-status.json") }
 
     private func read<T: Decodable>(_ name: String, default fallback: T) throws -> T {
         let url = directory.appending(path: name)

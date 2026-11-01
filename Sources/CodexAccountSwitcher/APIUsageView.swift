@@ -35,6 +35,10 @@ struct APIUsageView: View {
     @State private var organizationEditor: OrganizationEditorTarget?
     @State private var grantEditor: GrantEditorTarget?
     @State private var showsRemoval = false
+    @State private var showsAccountEditor = false
+    @State private var accountName = ""
+    @State private var expiryEditor: APITrackedAccount?
+    @State private var expiryInput = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -53,11 +57,12 @@ struct APIUsageView: View {
                             Button("关闭提示", systemImage: "xmark") { model.message = nil }.labelStyle(.iconOnly)
                         }.font(.callout).padding(12).background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
                     }
+                    accountCard
                     if let organization = model.organization {
                         scope(organization)
                         HStack(alignment: .top, spacing: 16) {
-                            costCard("今日 API 费用", report: model.snapshot?.today)
-                            costCard("本周期 API 费用", report: model.snapshot?.cycle)
+                            costCard("今日 API 费用（UTC 账单日）", report: model.snapshot?.today)
+                            costCard("本周期费用（日桶参考）", report: model.snapshot?.cycle)
                         }
                         usageCard
                         creditsCard
@@ -84,10 +89,49 @@ struct APIUsageView: View {
         .frame(minWidth: 820, minHeight: 650)
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(item: $organizationEditor) { target in
-            APIOrganizationEditor(model: model, existing: target.organization)
+            APIOrganizationEditor(model: model, existing: target.organization, accountID: target.accountID)
+        }
+        .sheet(isPresented: $showsAccountEditor) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("登记跟踪账号").font(.title2.weight(.semibold))
+                TextField("账号名称", text: $accountName).textFieldStyle(.roundedBorder)
+                Text("账号可先登记；组织和 Admin 账单权限可以稍后绑定。此处不接收普通项目调用 Key。")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("取消") { showsAccountEditor = false }
+                    Spacer()
+                    Button("登记") {
+                        do {
+                            try model.registerAccount(name: accountName, credentialNote: "待提供组织 ID 与 Admin API Key。",
+                                                      creditNote: "赠额金额及精确到期时间待核实；未建立提醒。")
+                            showsAccountEditor = false; accountName = ""
+                        } catch { model.message = error.localizedDescription }
+                    }.buttonStyle(.borderedProminent).disabled(accountName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }.padding(24).frame(width: 460)
         }
         .sheet(item: $grantEditor) { target in
             if let org = model.organization { APICreditEditor(model: model, organizationID: org.id, existing: target.grant) }
+        }
+        .sheet(item: $expiryEditor) { account in
+            VStack(alignment: .leading, spacing: 16) {
+                Text("\(account.name) · 到期日期提醒").font(.headline)
+                TextField("已知到期日期", text: $expiryInput, prompt: Text("YYYY-MM-DD；留空清除"))
+                    .textFieldStyle(.roundedBorder)
+                Text("仅记录日期，不代表官方精确到期时刻。提前 3 天与 1 天的北京时间 09:00 提醒；不参与赠额余额计算。")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("取消") { expiryEditor = nil }
+                    Spacer()
+                    Button("保存日期") {
+                        Task {
+                            do { try await model.setDateOnlyExpiry(accountID: account.id, date: expiryInput); expiryEditor = nil }
+                            catch { model.message = error.localizedDescription }
+                        }
+                    }.buttonStyle(.borderedProminent)
+                }
+            }.padding(24).frame(width: 500)
+            .onAppear { expiryInput = account.expiryDate ?? "" }
         }
         .confirmationDialog("移除组织及其全部本地记录？", isPresented: $showsRemoval) {
             Button("移除组织、密钥、缓存与赠额记录", role: .destructive) {
@@ -132,6 +176,62 @@ struct APIUsageView: View {
         }.padding(20)
     }
 
+    private var accountCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("跟踪账号").font(.headline)
+                Spacer()
+                Button("登记账号", systemImage: "person.badge.plus") { showsAccountEditor = true }
+            }
+            if model.configuration.accounts.isEmpty {
+                Text("可先登记账号，再绑定组织账单。多个账号绑定同一组织时，只查询一份组织统计。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(model.configuration.accounts) { account in
+                Divider()
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(account.name).fontWeight(.medium)
+                        if let id = account.organizationID {
+                            Text("组织：\(id)").font(.caption.monospaced())
+                            let report = model.snapshots.first { $0.organization.id == id }?.cycle
+                            Text(report?.value != nil && report?.error == nil ? "账单已同步" : "账单待同步／待核验")
+                                .font(.caption).foregroundStyle(report?.value != nil && report?.error == nil ? .green : .orange)
+                        } else {
+                            Text("待绑定组织与 Admin 账单权限").font(.caption).foregroundStyle(.orange)
+                        }
+                        Text(account.credentialNote).font(.caption).foregroundStyle(.secondary)
+                        Text(account.creditNote).font(.caption).foregroundStyle(.secondary)
+                        if let date = account.expiryDate {
+                            Text("已知到期日期：\(date)（准确时刻待核实）；提前 3／1 天 09:00 北京时间提醒。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Text(accountReminderStatus(account))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing) {
+                        Button(account.organizationID == nil ? "连接账单" : "查看账单") {
+                            if let id = account.organizationID { model.select(id) }
+                            else { organizationEditor = OrganizationEditorTarget(organization: nil, accountID: account.id) }
+                        }
+                        Button("到期日期") { expiryEditor = account }
+                    }
+                }
+            }
+        }.padding(18).background(.background, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func accountReminderStatus(_ account: APITrackedAccount) -> String {
+        guard model.configuration.remindersEnabled else { return "提醒未启用" }
+        let grants = model.configuration.grants.filter { $0.organizationID == account.organizationID }
+        guard !APICreditReminderPlanner.reminders(grants: grants, now: Date()).isEmpty
+                || !APIDateOnlyReminderPlanner.reminders(accounts: [account], now: Date()).isEmpty else {
+            return "提醒未排程：尚无已核实的到期批次／未来提醒时点。"
+        }
+        return model.reminderStatus
+    }
+
     private func scope(_ organization: APIOrganization) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(organization.name).font(.headline)
@@ -139,7 +239,7 @@ struct APIUsageView: View {
                 .font(.callout.monospaced()).textSelection(.enabled)
             Text("统计周期：\(APIUsageFormat.date(organization.cycleStart)) → \(APIUsageFormat.date(organization.cycleEnd))")
                 .font(.caption).foregroundStyle(.secondary)
-            Text("今日按北京时间划分；查询截止至刷新时刻，区间含起点、不含终点。组织只统计一次，不随 Codex 账号切换。")
+            Text("今日按 UTC 账单日划分，时间以北京时间显示。周期查询可能返回边界外的完整 UTC 日桶，日桶参考金额不能视为精确周期费用。组织只统计一次。")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -162,6 +262,7 @@ struct APIUsageView: View {
                 }
             } else { Text("未连接／待核验").font(.title3).foregroundStyle(.secondary) }
             reportStatus(report).font(.caption).foregroundStyle(.secondary)
+            if let coverage = report?.value?.bucketRange { bucketCoverage(coverage) }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .padding(18).background(.background, in: RoundedRectangle(cornerRadius: 12))
@@ -179,7 +280,7 @@ struct APIUsageView: View {
 
     private var usageCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("本周期模型用量").font(.headline)
+            Text("本周期模型用量（官方日桶）").font(.headline)
             if let usage = model.snapshot?.usage.value {
                 HStack(spacing: 28) {
                     metric("请求", values: usage.models.map(\.requests))
@@ -205,6 +306,7 @@ struct APIUsageView: View {
                 if usage.models.isEmpty { Text("官方未返回此范围内的模型用量条目。").foregroundStyle(.secondary) }
             } else { Text("用量未连接／待核验").foregroundStyle(.secondary) }
             reportStatus(model.snapshot?.usage).font(.caption).foregroundStyle(.secondary)
+            if let coverage = model.snapshot?.usage.value?.bucketRange { bucketCoverage(coverage) }
             if let costs = model.snapshot?.cycle.value, !costs.lines.isEmpty {
                 DisclosureGroup("查看官方费用条目（全部能力）") {
                     VStack(alignment: .leading, spacing: 8) {
@@ -229,6 +331,11 @@ struct APIUsageView: View {
             Text(title).font(.caption).foregroundStyle(.secondary)
             Text(values.reduce(Decimal.zero) { $0 + Decimal($1) }.description).font(.title3.weight(.medium)).monospacedDigit()
         }
+    }
+
+    private func bucketCoverage(_ range: APIQueryRange) -> some View {
+        Text("实际返回日桶：\(APIUsageFormat.date(range.start)) → \(APIUsageFormat.date(range.end))。完整日桶不按小时拆分，边界外时段可能被包含。")
+            .font(.caption).foregroundStyle(.secondary)
     }
 
     private var creditsCard: some View {
@@ -276,6 +383,7 @@ struct APIUsageView: View {
             Toggle("到期前 7／3／1 天本机提醒", isOn: Binding(
                 get: { model.configuration.remindersEnabled }, set: { value in Task { await model.setReminders(value) } }))
                 .toggleStyle(.switch)
+            Text(model.reminderStatus).font(.caption).foregroundStyle(.secondary)
             Text("仅主动开启时请求通知权限。每个批次按精确到期时刻提前 7／3／1 个 24 小时排程；发放前或已错过的提醒不补发。最多预排最近 60 条，新增和修改排程、后台刷新需应用运行。已排程通知由 macOS 投递，受系统通知设置、专注模式、休眠和关机影响，不保证准时送达。")
                 .font(.caption).foregroundStyle(.secondary)
         }.padding(18).background(.background, in: RoundedRectangle(cornerRadius: 12))
@@ -285,6 +393,7 @@ struct APIUsageView: View {
 private struct OrganizationEditorTarget: Identifiable {
     let id = UUID()
     var organization: APIOrganization?
+    var accountID: UUID? = nil
 }
 private struct GrantEditorTarget: Identifiable {
     let id = UUID()
@@ -294,6 +403,7 @@ private struct GrantEditorTarget: Identifiable {
 private struct APIOrganizationEditor: View {
     @ObservedObject var model: APIUsageModel
     let existing: APIOrganization?
+    var accountID: UUID? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var id = ""
     @State private var name = ""
@@ -339,7 +449,7 @@ private struct APIOrganizationEditor: View {
             guard let from = APIUsageFormat.parse(start), let to = APIUsageFormat.parse(end) else {
                 throw APIUsageError.invalidConfiguration
             }
-            try model.saveOrganization(APIOrganization(id: id, name: name, projectID: project, cycleStart: from, cycleEnd: to), key: key)
+            try model.saveOrganization(APIOrganization(id: id, name: name, projectID: project, cycleStart: from, cycleEnd: to), key: key, accountID: accountID)
             key = ""; dismiss()
         } catch { self.error = error.localizedDescription }
     }

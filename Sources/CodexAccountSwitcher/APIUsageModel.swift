@@ -8,6 +8,7 @@ final class APIUsageModel: ObservableObject {
     @Published private(set) var snapshots: [APIUsageSnapshot] = []
     @Published private(set) var isRefreshing = false
     @Published var message: String?
+    @Published private(set) var reminderStatus = "尚未检查通知权限与排程"
     let isDemo: Bool
     private let store: APIUsageStore
     private let keys: any APIKeyStoring
@@ -55,7 +56,7 @@ final class APIUsageModel: ObservableObject {
         refresh()
     }
 
-    func saveOrganization(_ organization: APIOrganization, key: String) throws {
+    func saveOrganization(_ organization: APIOrganization, key: String, accountID: UUID? = nil) throws {
         try organization.validate()
         guard !isDemo else { throw APIUsageError.invalidConfiguration }
         let cleanKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -69,6 +70,10 @@ final class APIUsageModel: ObservableObject {
         next.organizations.removeAll { $0.id == organization.id }
         next.organizations.append(organization)
         next.selectedID = organization.id
+        if let accountID, let index = next.accounts.firstIndex(where: { $0.id == accountID }) {
+            next.accounts[index].organizationID = organization.id
+            next.accounts[index].credentialNote = "已绑定组织；实际账单权限以下方同步结果为准。"
+        }
         // Save configuration before a new secret, so an interrupted save cannot orphan a key.
         try store.saveConfiguration(next)
         configuration = next
@@ -77,6 +82,39 @@ final class APIUsageModel: ObservableObject {
         snapshots.removeAll { $0.organization.id == organization.id && $0.organization != organization }
         try store.saveSnapshots(snapshots)
         refresh()
+    }
+
+    @discardableResult
+    func registerAccount(name: String, organizationID: String? = nil,
+                         credentialNote: String, creditNote: String) throws -> APITrackedAccount {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { throw APIUsageError.invalidConfiguration }
+        var next = configuration
+        let existing = next.accounts.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        let account = APITrackedAccount(id: existing?.id ?? UUID(), name: name,
+                                        organizationID: organizationID ?? existing?.organizationID,
+                                        credentialNote: credentialNote, creditNote: creditNote,
+                                        expiryDate: existing?.expiryDate, expiryTimeZone: existing?.expiryTimeZone)
+        next.accounts.removeAll { $0.id == account.id }; next.accounts.append(account)
+        if !isDemo { try store.saveConfiguration(next) }
+        configuration = next
+        return account
+    }
+
+    func setDateOnlyExpiry(accountID: UUID, date: String?) async throws {
+        let date = date?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = date?.isEmpty == true ? nil : date
+        if let value, APIDateOnlyReminderPlanner.parse(value, timeZone: "Asia/Shanghai") == nil {
+            throw APIUsageError.invalidGrant
+        }
+        var next = configuration
+        guard let index = next.accounts.firstIndex(where: { $0.id == accountID }) else { throw APIUsageError.invalidConfiguration }
+        next.accounts[index].expiryDate = value
+        next.accounts[index].expiryTimeZone = value == nil ? nil : "Asia/Shanghai"
+        if !isDemo { try store.saveConfiguration(next) }
+        configuration = next
+        if notifications == nil && !isDemo { notifications = APICreditNotifications() }
+        await syncNotifications()
     }
 
     func disconnect() throws {
@@ -95,6 +133,10 @@ final class APIUsageModel: ObservableObject {
         next.organizations.removeAll { $0.id == organization.id }
         next.grants.removeAll { $0.organizationID == organization.id }
         next.selectedID = next.organizations.first?.id
+        for index in next.accounts.indices where next.accounts[index].organizationID == organization.id {
+            next.accounts[index].organizationID = nil
+            next.accounts[index].credentialNote = "组织已移除，待重新绑定。"
+        }
         try store.saveConfiguration(next); configuration = next
         await syncNotifications()
     }
@@ -138,8 +180,33 @@ final class APIUsageModel: ObservableObject {
 
     private func syncNotifications() async {
         guard !isDemo else { return }
-        do { try await notifications?.reconcile(grants: configuration.grants, enabled: configuration.remindersEnabled) }
-        catch { message = "提醒排程失败：\(error.localizedDescription)" }
+        var syncError: String?
+        do {
+            try await notifications?.reconcile(grants: configuration.grants, accounts: configuration.accounts,
+                                               enabled: configuration.remindersEnabled)
+            if !configuration.remindersEnabled { reminderStatus = "未启用" }
+            else if notifications == nil { reminderStatus = "尚未检查通知权限与排程" }
+            else {
+                let count = min(60, APICreditReminderPlanner.reminders(grants: configuration.grants, now: Date()).count
+                    + APIDateOnlyReminderPlanner.reminders(accounts: configuration.accounts, now: Date()).count)
+                reminderStatus = count > 0 ? "已排程 \(count) 条本机提醒" : "未排程：尚无已核实的赠额批次／未来提醒时点"
+            }
+        } catch {
+            syncError = error.localizedDescription
+            reminderStatus = "未生效：通知权限或排程失败"
+            message = "提醒排程失败：\(error.localizedDescription)"
+        }
+        if let notifications {
+            do {
+                var status = await notifications.status()
+                status.error = syncError ?? status.error
+                if configuration.remindersEnabled && syncError == nil && !status.pendingIDs.isEmpty {
+                    reminderStatus = "系统已确认待发送 \(status.pendingIDs.count) 条本机提醒（本功能总计）"
+                }
+                try store.saveNotificationStatus(status)
+            }
+            catch { message = "通知状态回读保存失败：\(error.localizedDescription)" }
+        }
     }
 
     private func persist(_ next: APIUsageConfiguration) {
