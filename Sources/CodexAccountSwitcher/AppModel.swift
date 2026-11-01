@@ -42,7 +42,11 @@ final class AppModel: AccountController, @MainActor ObservableObject {
     }
 
     static func live() -> AppModel {
-        let store = AccountStore()
+        let isolatedBase = APIAppMode.usesIsolatedStartup
+            ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appending(path: "Codex API Monitor/Accounts", directoryHint: .isDirectory)
+            : nil
+        let store = AccountStore(baseURL: isolatedBase)
         let codex = CodexClient()
         return AppModel(store: store, codex: codex,
                         switchService: SwitchService(desktop: DesktopController(), store: store, codex: CredentialIdentity()))

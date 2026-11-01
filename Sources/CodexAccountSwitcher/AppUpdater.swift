@@ -30,6 +30,7 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate, @preconc
     }
 
     func start() {
+        guard !APIAppMode.usesIsolatedStartup else { return }
         guard controller == nil else { return }
         let controller = SPUStandardUpdaterController(
             startingUpdater: false, updaterDelegate: self, userDriverDelegate: self

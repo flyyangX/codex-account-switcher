@@ -1,3 +1,5 @@
+> This fork adds the macOS **Codex API Monitor** development build: official organization usage/costs, Keychain-only admin credentials, and manually verified credit expiry reminders. See [the feature guide](docs/api-usage.md) (Simplified Chinese). This is not an upstream release; upstream attribution and project information follow.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/account-switcher-logo-white.png">

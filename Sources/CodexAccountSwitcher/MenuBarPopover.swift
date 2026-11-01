@@ -3,6 +3,7 @@ import AppKit
 import SwiftUI
 
 struct MenuBarPopover: View {
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject var model: AppModel
     @ObservedObject var updater: AppUpdater
     @ObservedObject var tiboForecast: TiboForecastModel
@@ -52,9 +53,10 @@ struct MenuBarPopover: View {
         .frame(width: 400)
         .onAppear {
             page = model.isAddingAccount ? .manageAccounts : .accounts
-            Task { await tiboForecast.refreshIfDue() }
+            if !APIAppMode.usesIsolatedStartup { Task { await tiboForecast.refreshIfDue() } }
         }
         .task {
+            guard !APIAppMode.usesIsolatedStartup else { return }
             await model.start()
             model.refreshWeeklyUsage()
         }
@@ -101,6 +103,20 @@ struct MenuBarPopover: View {
                 // Ignore the initial zero-height probe and the previous page's height.
                 .fixedSize(horizontal: false, vertical: true)
             }
+
+            Divider()
+            Button {
+                openWindow(id: "api-usage")
+                NSApp.activate(ignoringOtherApps: true)
+            } label: {
+                HStack {
+                    Label("API 用量与赠额", systemImage: "chart.bar.xaxis")
+                    Spacer()
+                    Image(systemName: "arrow.up.forward.square")
+                }
+                .font(.system(size: 12, weight: .medium))
+                .padding(12).contentShape(Rectangle())
+            }.buttonStyle(.plain)
 
             Divider()
             TiboForecastEntry(model: model, forecastModel: tiboForecast)
