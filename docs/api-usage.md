@@ -4,7 +4,13 @@
 
 ## 启动与连接
 
-运行 `./scripts/package-api-monitor.sh`，打开脚本最后输出的 `Codex API Monitor.app`。实际目录由 `swift build -c release --show-bin-path` 决定（本机为 `.build/out/Products/Release/`）。这个包使用独立名称和 Bundle ID `com.flyyang.codex-api-monitor`，不安装或覆盖已有应用，不连接上游 Sparkle 更新源。API 窗口默认打开，也可从菜单栏的“API 用量与赠额”进入。
+完整整合版：运行 `./scripts/package-integrated-app.sh`，打开输出的 `Codex Account Switcher.app`。保留原来的菜单栏账号切换、账号管理、额度百分比、5 小时／周用量、设置与刷新行为；菜单栏新增“API 用量与赠额”，看板的“Codex 账号”按钮可打开同一套账号界面。整合版同时提供普通应用窗口和 Dock 入口，便于双击打开看板，菜单栏入口保留。构建脚本本身不安装或覆盖应用。
+
+整合包沿用 `com.flyyang.codex-api-monitor` 标识，以保留独立测试版已经建立的 WebKit 登录状态及通知归属；不启用 `APIStandaloneBuild`，因此账号读取原来的 `~/Library/Application Support/Codex Account Switcher/`。API 配置及 Keychain service 仍沿用既有目录／标识。无需重新导入原账号或迁移网页 cookie。为了避免上游更新覆盖本地整合功能，关闭上游 Sparkle 更新，并在设置中明确提示手动更新。登录启动按本机 ServiceManagement 状态显示，不能从普通配置文件推断。
+
+替换本地安装前，退出原版和独立测试版，将旧 `.app`、两套配置目录和 WebKit 目录备份到仅当前用户可访问的位置；先从构建目录验证账号、设置、网页同步，再替换 `/Applications/Codex Account Switcher.app` 并复核。保留旧包可回退；不要删除账号目录、Keychain 项或 WebKit profile。应用仍为本地 ad-hoc 开发签名，系统可能要求重新授权 Keychain。
+
+独立 API 测试包：运行 `./scripts/package-api-monitor.sh`，打开输出的 `Codex API Monitor.app`。实际目录由 `swift build -c release --show-bin-path` 决定（本机为 `.build/out/Products/Release/`）。独立包使用简化菜单栏，不启用原 Codex 账号功能；不能当作完整整合版替代原应用。API 窗口默认打开，也可从菜单栏的“API 用量与赠额”进入。
 
 1. 点击右上角连接设置菜单中的“添加组织”，填写官方组织 ID（`org-…`）、名称和可选项目 ID（`proj_…`）。留空项目表示整个组织，包括未归属项目的费用。
 2. 在概览顶部直接选择“今日、近 7 天、近 30 天、本月、上月”，或打开“自定义”使用日期选择器。日期范围包含首尾两天、按 UTC 账单日查询，最长 366 天，今日查询到刷新时刻。选择按组织保存，切换账号后会恢复。旧配置保留“已设周期”，赠额批次也可设为统计周期；非 UTC 边界的旧周期仍按完整日桶参考展示。
@@ -155,3 +161,12 @@ open "$(swift build -c release --show-bin-path)/Codex API Monitor.app" --args --
 - 真机首屏及约 1020×720 内容尺寸下，三张账号卡、金额、倒数均完整显示；切换账号只改变明细，汇总不变。真实金额仅在本机保存。
 - 顺带修复经典登录钥匙串忽略单次查询交互设置、导致后台一直等待授权的问题：静默读取期间暂时关闭进程钥匙串交互并恢复原设置，各项操作串行；不修改任何密钥 ACL。重启及切换三个账号均立即显示需要授权并保留原缓存，没有弹窗或持续载入。开发包重新签名后的真实用量仍需主动授权，网页额度同步不受影响。
 - 汇总与 API 模型针对测试 13 项通过、默认 Keychain 集成项跳过；随后显式启用合成 Keychain 集成测试通过，覆盖静默读取及交互设置恢复。最终 release 包构建通过。
+
+### 完整整合版与本机安装（2026-11-02）
+
+- 新增 `package-integrated-app.sh`：完整菜单栏与 API 看板共存，按原账号目录启动；新增看板到账号窗口的入口，共用原菜单栏视图和模型。
+- 全套测试输出共享核心 84 项／9 suites、Mac 71 项／11 suites 通过，保留 RPC fixture／installed CLI、fish、默认 Keychain 集成等环境跳过项；最终 release 构建和包签名核验通过。
+- 安装前真机验证原三个 Codex 账号、当前账号、用量显示、管理入口、设置及切换确认取消；未真正切换账号，避免退出当前 Codex 会话。三个 API 网页账号无需重新登录便完成同步。
+- 已在用户授权下备份并替换本机旧应用，安装名为 `Codex Account Switcher 整合版.app`。安装后账号注册表、设置、网页 profile 标识与当前 Codex 凭据文件元数据均保持不变；实际安装进程中的账号界面和 API 看板已回读。
+- 当前签名下 Admin Key 需主动本机授权，Costs／Usage 显示缓存，未把网页余额同步当成 API 用量刷新成功。登录启动当前关闭且系统返回 `notFound`，没有启用或声称该功能已通过开机测试。系统菜单栏图标的直接点击仍受 UI 工具能力限制；共用的菜单栏视图已通过账号窗口检查。
+- 这是用户本机安装，未创建公开 Release、未公证、未向上游提交 PR；旧包与私有数据备份可用于回退。

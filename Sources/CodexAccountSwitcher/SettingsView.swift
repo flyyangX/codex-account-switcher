@@ -96,9 +96,9 @@ struct SettingsView: View {
                 settingSwitch("automatically_check_updates", isOn: Binding(
                     get: { updater.automaticallyChecks },
                     set: { updater.setAutomaticallyChecks($0) }
-                ))
+                )).disabled(updater.isLocalIntegratedBuild)
             }
-            Text(model.text("update_check_hint"))
+            Text(model.text(updater.isLocalIntegratedBuild ? "integrated_update_hint" : "update_check_hint"))
                 .foregroundStyle(.secondary)
                 .modifier(SettingsDetail())
             rowDivider

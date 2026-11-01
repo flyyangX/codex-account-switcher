@@ -32,6 +32,7 @@ enum APIUsageFormat {
 }
 
 struct APIUsageView: View {
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject var model: APIUsageModel
     @State private var organizationEditor: OrganizationEditorTarget?
     @State private var grantEditor: GrantEditorTarget?
@@ -220,6 +221,12 @@ struct APIUsageView: View {
                 Text(title).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
             }
             Spacer()
+            if !APIAppMode.usesIsolatedStartup {
+                Button("Codex 账号", systemImage: "person.crop.rectangle") {
+                    openWindow(id: "accounts")
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+            }
             if model.isRefreshing { ProgressView().controlSize(.small); Text("同步中").font(.caption).foregroundStyle(.secondary) }
             Button { model.refreshAll() } label: { Label("刷新", systemImage: "arrow.clockwise") }
                 .disabled(model.isRefreshing || model.isDemo || model.organization == nil)

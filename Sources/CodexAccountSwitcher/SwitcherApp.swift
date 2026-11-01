@@ -12,6 +12,16 @@ struct SwitcherApp: App {
         }
         .defaultSize(width: 1180, height: 860)
 
+        Window("Codex 账号", id: "accounts") {
+            if APIAppMode.usesIsolatedStartup {
+                APIMonitorMenu(model: appDelegate.apiUsage)
+            } else {
+                MenuBarPopover(model: appDelegate.model, updater: appDelegate.updater,
+                               tiboForecast: appDelegate.tiboForecast)
+            }
+        }
+        .windowResizability(.contentSize)
+
         MenuBarExtra {
             if APIAppMode.usesIsolatedStartup {
                 APIMonitorMenu(model: appDelegate.apiUsage)
