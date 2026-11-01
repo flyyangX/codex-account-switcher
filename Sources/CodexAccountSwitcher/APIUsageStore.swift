@@ -67,6 +67,7 @@ struct APICreditBalance: Codable, Equatable {
     var isInitialGrantOnly: Bool
     var source: String
     var verifiedAt: Date
+    var webSynced: Bool? = nil
 
     func validate() throws {
         guard totalCredits != nil || remainingCredits != nil,
@@ -77,6 +78,11 @@ struct APICreditBalance: Codable, Equatable {
     }
 }
 
+struct APIWebBillingConnection: Codable, Equatable {
+    var profileID = UUID()
+    var enabled = false
+}
+
 struct APIUsageConfiguration: Codable, Equatable {
     var organizations: [APIOrganization] = []
     var selectedID: String?
@@ -85,10 +91,11 @@ struct APIUsageConfiguration: Codable, Equatable {
     var accounts: [APITrackedAccount] = []
     var periods: [String: APIPeriodSelection] = [:]
     var creditBalances: [String: APICreditBalance] = [:]
+    var webBilling: [String: APIWebBillingConnection] = [:]
 
     init() {}
     private enum CodingKeys: String, CodingKey {
-        case organizations, selectedID, grants, remindersEnabled, accounts, periods, creditBalances
+        case organizations, selectedID, grants, remindersEnabled, accounts, periods, creditBalances, webBilling
     }
     init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -99,6 +106,7 @@ struct APIUsageConfiguration: Codable, Equatable {
         accounts = try values.decodeIfPresent([APITrackedAccount].self, forKey: .accounts) ?? []
         periods = try values.decodeIfPresent([String: APIPeriodSelection].self, forKey: .periods) ?? [:]
         creditBalances = try values.decodeIfPresent([String: APICreditBalance].self, forKey: .creditBalances) ?? [:]
+        webBilling = try values.decodeIfPresent([String: APIWebBillingConnection].self, forKey: .webBilling) ?? [:]
     }
 }
 
@@ -144,23 +152,23 @@ struct APIUsageStore {
 }
 
 protocol APIKeyStoring {
-    @MainActor func readForRefresh(organizationID: String) async throws -> String?
+    @MainActor func readForRefresh(organizationID: String, allowInteraction: Bool) async throws -> String?
     func read(organizationID: String) throws -> String?
     func save(_ key: String, organizationID: String) throws
     func delete(organizationID: String) throws
 }
 
 extension APIKeyStoring {
-    @MainActor func readForRefresh(organizationID: String) async throws -> String? {
+    @MainActor func readForRefresh(organizationID: String, allowInteraction: Bool) async throws -> String? {
         try read(organizationID: organizationID)
     }
 }
 
 struct APIKeychain: APIKeyStoring, Sendable {
-    @MainActor func readForRefresh(organizationID: String) async throws -> String? {
+    @MainActor func readForRefresh(organizationID: String, allowInteraction: Bool) async throws -> String? {
         // Security may wait for the login keychain / system authorization. Keep AppKit responsive.
         try await Task.detached(priority: .userInitiated) {
-            try self.read(organizationID: organizationID)
+            try self.readItem(organizationID: organizationID, allowInteraction: allowInteraction)
         }.value
     }
 
@@ -171,7 +179,11 @@ struct APIKeychain: APIKeyStoring, Sendable {
          kSecAttrSynchronizable as String: false]
     }
     func read(organizationID: String) throws -> String? {
+        try readItem(organizationID: organizationID, allowInteraction: true)
+    }
+    private func readItem(organizationID: String, allowInteraction: Bool) throws -> String? {
         var query = query(organizationID)
+        query[kSecUseAuthenticationUI as String] = allowInteraction ? kSecUseAuthenticationUIAllow : kSecUseAuthenticationUIFail
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
@@ -199,7 +211,12 @@ struct APIKeychain: APIKeyStoring, Sendable {
     }
 }
 
-private struct APIKeychainError: LocalizedError {
+struct APIKeychainError: LocalizedError {
     let status: OSStatus
-    var errorDescription: String? { "钥匙串操作失败（\(status)），请解锁登录钥匙串后重试。" }
+    var errorDescription: String? {
+        if status == errSecInteractionNotAllowed || status == errSecAuthFailed || status == errSecUserCanceled {
+            return "密钥需要本机授权；自动刷新已暂停读取，不会弹窗。请主动点击“授权密钥”。"
+        }
+        return "钥匙串操作失败（\(status)），请检查登录钥匙串。"
+    }
 }

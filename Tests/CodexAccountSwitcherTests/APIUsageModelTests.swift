@@ -58,6 +58,23 @@ struct APIUsageModelTests {
         #expect(try JSONDecoder().decode(APIUsageConfiguration.self, from: old).creditBalances.isEmpty)
     }
 
+    @Test func refreshIsSilentAndExplicitAuthorizationIsCachedForTheSession() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "api-silent-keys-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let keys = InteractionKeys()
+        let model = APIUsageModel(store: APIUsageStore(directory: root), keys: keys, client: APIUsageClient(transport: ModelTransport()))
+        try model.saveOrganization(makeOrganization(), key: "")
+        await model.refreshAndWait()
+        #expect(keys.interactions == [false])
+        #expect(model.snapshot?.cycle.value == nil)
+        model.authorizeCredential()
+        await model.refreshAndWait()
+        #expect(keys.interactions == [false, true])
+        #expect(model.snapshot?.cycle.value != nil)
+        await model.refreshAndWait()
+        #expect(keys.interactions == [false, true])
+    }
+
     @Test func dateOnlyRemindersUseDaytimeWithoutInventingExpiryTime() throws {
         let account = APITrackedAccount(name: "Synthetic", credentialNote: "", creditNote: "",
                                         expiryDate: "2030-05-10", expiryTimeZone: "Asia/Shanghai")
@@ -150,9 +167,10 @@ struct APIUsageModelTests {
         #expect(failed.usage.error == nil)
         #expect(failed.usage.value?.models.first?.requests == 3)
         keys.values.removeAll()
-        await model.refreshAndWait()
-        #expect(model.snapshot?.cycle.value == original.cycle.value)
-        #expect(model.snapshot?.cycle.error == APIUsageError.missingCredential.localizedDescription)
+        let reopened = APIUsageModel(store: APIUsageStore(directory: root), keys: keys, client: APIUsageClient(transport: transport))
+        await reopened.refreshAndWait()
+        #expect(reopened.snapshot?.cycle.value == original.cycle.value)
+        #expect(reopened.snapshot?.cycle.error == APIUsageError.missingCredential.localizedDescription)
     }
 
     @Test func missingCredentialDoesNotRequestOrShowZero() async throws {
@@ -228,4 +246,16 @@ private actor ModelTransport: APIUsageTransport {
         let json = "{\"data\":[{\"start_time\":\(start),\"end_time\":\(end),\"results\":[\(rows)]}],\"has_more\":false,\"next_page\":null}"
         return (Data(json.utf8), isCosts ? costStatus : 200)
     }
+}
+
+private final class InteractionKeys: APIKeyStoring {
+    var interactions: [Bool] = []
+    @MainActor func readForRefresh(organizationID: String, allowInteraction: Bool) async throws -> String? {
+        interactions.append(allowInteraction)
+        if !allowInteraction { throw APIKeychainError(status: -25308) }
+        return "synthetic-session-only"
+    }
+    func read(organizationID: String) throws -> String? { nil }
+    func save(_ key: String, organizationID: String) throws {}
+    func delete(organizationID: String) throws {}
 }

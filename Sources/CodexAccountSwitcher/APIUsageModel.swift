@@ -17,6 +17,8 @@ final class APIUsageModel: ObservableObject {
     private var timerTask: Task<Void, Never>?
     private var revision = UUID()
     private var notifications: APICreditNotifications?
+    private var credentialCache: [String: String] = [:]
+    lazy var webBilling = APIWebBillingController()
 
     init(store: APIUsageStore = APIUsageStore(), keys: any APIKeyStoring = APIKeychain(),
          client: APIUsageClient = APIUsageClient(), demo: Bool = false) {
@@ -44,6 +46,71 @@ final class APIUsageModel: ObservableObject {
         configuration = next
     }
 
+    func prepareWebBilling(organizationID: String) throws -> UUID {
+        guard !isDemo, configuration.organizations.contains(where: { $0.id == organizationID }) else { throw APIUsageError.invalidConfiguration }
+        if let connection = configuration.webBilling[organizationID] { return connection.profileID }
+        var next = configuration
+        let connection = APIWebBillingConnection()
+        next.webBilling[organizationID] = connection
+        try store.saveConfiguration(next); configuration = next
+        return connection.profileID
+    }
+
+    func syncWebBilling(organizationID: String, interactive: Bool = false) async {
+        guard !isDemo, let org = configuration.organizations.first(where: { $0.id == organizationID }),
+              let connection = configuration.webBilling[organizationID],
+              !webBilling.busyIDs.contains(organizationID) else { return }
+        do {
+            let result = try await webBilling.sync(organization: org, profileID: connection.profileID, interactive: interactive)
+            try Task.checkCancellation()
+            guard configuration.webBilling[organizationID]?.profileID == connection.profileID else { return }
+            var next = configuration
+            next.creditBalances[organizationID] = result.balance
+            next.webBilling[organizationID]?.enabled = true
+            if let expiry = result.nextExpiry {
+                for index in next.accounts.indices where next.accounts[index].organizationID == organizationID {
+                    next.accounts[index].expiryDate = expiry
+                    next.accounts[index].expiryTimeZone = "Asia/Shanghai"
+                    next.accounts[index].creditNote = "官方赠额网页自动同步；仅显示到期日期，精确时刻待核实。"
+                }
+            }
+            try store.saveConfiguration(next); configuration = next
+            await syncNotifications()
+        } catch is CancellationError {
+            webBilling.setStatus("已暂停网页连接", organizationID: organizationID)
+        } catch {
+            webBilling.setStatus(error.localizedDescription, organizationID: organizationID)
+        }
+    }
+
+    private func syncConnectedWebBilling() async {
+        for (id, connection) in configuration.webBilling where connection.enabled {
+            guard !Task.isCancelled else { return }
+            await syncWebBilling(organizationID: id)
+        }
+    }
+
+    func pauseWebBilling() {
+        guard let id = organization?.id else { return }
+        var next = configuration; next.webBilling[id]?.enabled = false
+        persist(next)
+        webBilling.cancel(organizationID: id)
+        webBilling.setStatus("已暂停网页自动同步，历史数据保留。", organizationID: id)
+    }
+
+    func refreshAll() {
+        refresh()
+        if let id = organization?.id, configuration.webBilling[id]?.enabled == true {
+            Task { await syncWebBilling(organizationID: id) }
+        }
+    }
+
+    func authorizeCredential() {
+        guard !isRefreshing else { return }
+        invalidateRefresh()
+        refresh(allowKeychainInteraction: true)
+    }
+
     var period: APIPeriodSelection {
         configuration.periods[organization?.id ?? ""] ?? APIPeriodSelection(preset: .configured)
     }
@@ -63,7 +130,7 @@ final class APIUsageModel: ObservableObject {
     func start() {
         guard !isDemo, timerTask == nil else { return }
         notifications = APICreditNotifications()
-        Task { await syncNotifications() }
+        Task { await syncNotifications(); await syncConnectedWebBilling() }
         refresh()
         timerTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -71,6 +138,7 @@ final class APIUsageModel: ObservableObject {
                 guard let self else { return }
                 self.refresh()
                 await self.syncNotifications()
+                await self.syncConnectedWebBilling()
             }
         }
     }
@@ -79,7 +147,7 @@ final class APIUsageModel: ObservableObject {
         invalidateRefresh()
         var next = configuration; next.selectedID = id
         persist(next)
-        refresh()
+        refreshAll()
     }
 
     func saveOrganization(_ organization: APIOrganization, key: String, accountID: UUID? = nil) throws {
@@ -103,7 +171,10 @@ final class APIUsageModel: ObservableObject {
         // Save configuration before a new secret, so an interrupted save cannot orphan a key.
         try store.saveConfiguration(next)
         configuration = next
-        if !cleanKey.isEmpty { try keys.save(cleanKey, organizationID: organization.id) }
+        if !cleanKey.isEmpty {
+            try keys.save(cleanKey, organizationID: organization.id)
+            credentialCache[organization.id] = cleanKey
+        }
         invalidateRefresh()
         snapshots.removeAll { $0.organization.id == organization.id && $0.organization != organization }
         try store.saveSnapshots(snapshots)
@@ -146,6 +217,7 @@ final class APIUsageModel: ObservableObject {
     func disconnect() throws {
         guard let organization, !isDemo else { return }
         invalidateRefresh()
+        credentialCache.removeValue(forKey: organization.id)
         try keys.delete(organizationID: organization.id)
         snapshots.removeAll { $0.organization.id == organization.id }
         try store.saveSnapshots(snapshots)
@@ -155,17 +227,23 @@ final class APIUsageModel: ObservableObject {
     func removeOrganization() async throws {
         guard let organization, !isDemo else { return }
         try disconnect()
+        let webConnection = configuration.webBilling[organization.id]
         var next = configuration
         next.organizations.removeAll { $0.id == organization.id }
         next.grants.removeAll { $0.organizationID == organization.id }
         next.periods.removeValue(forKey: organization.id)
         next.creditBalances.removeValue(forKey: organization.id)
+        next.webBilling.removeValue(forKey: organization.id)
+        webBilling.cancel(organizationID: organization.id)
         next.selectedID = next.organizations.first?.id
         for index in next.accounts.indices where next.accounts[index].organizationID == organization.id {
             next.accounts[index].organizationID = nil
             next.accounts[index].credentialNote = "组织已移除，待重新绑定。"
         }
         try store.saveConfiguration(next); configuration = next
+        if let webConnection {
+            await webBilling.clearProfile(organizationID: organization.id, profileID: webConnection.profileID)
+        }
         await syncNotifications()
     }
 
@@ -249,7 +327,7 @@ final class APIUsageModel: ObservableObject {
         revision = UUID(); refreshTask?.cancel(); refreshTask = nil; isRefreshing = false
     }
 
-    func refresh() {
+    func refresh(allowKeychainInteraction: Bool = false) {
         guard !isDemo, !isRefreshing, let organization else { return }
         let generation = revision
         isRefreshing = true
@@ -257,7 +335,12 @@ final class APIUsageModel: ObservableObject {
             guard let self else { return }
             var next = APIUsageSnapshot(organization: organization, now: Date(), period: period)
             do {
-                guard let key = try await keys.readForRefresh(organizationID: organization.id) else { throw APIUsageError.missingCredential }
+                let cachedKey = credentialCache[organization.id]
+                let loadedKey: String?
+                if let cachedKey { loadedKey = cachedKey }
+                else { loadedKey = try await keys.readForRefresh(organizationID: organization.id, allowInteraction: allowKeychainInteraction) }
+                guard let key = loadedKey else { throw APIUsageError.missingCredential }
+                credentialCache[organization.id] = key
                 try Task.checkCancellation()
                 let old = snapshot
                 let todayRange = next.today.range

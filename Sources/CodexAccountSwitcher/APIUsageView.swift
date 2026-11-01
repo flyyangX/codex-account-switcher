@@ -43,6 +43,7 @@ struct APIUsageView: View {
     @State private var showsCustomPeriod = false
     @State private var showsDetails = false
     @State private var showsBalanceEditor = false
+    @State private var webEditor: APIWebEditorTarget?
     @State private var page = "overview"
     private let accent = Color.indigo
 
@@ -90,6 +91,9 @@ struct APIUsageView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(item: $organizationEditor) { target in
             APIOrganizationEditor(model: model, existing: target.organization, accountID: target.accountID)
+        }
+        .sheet(item: $webEditor) { target in
+            APIWebBillingSheet(model: model, browser: model.webBilling, organization: target.organization, profileID: target.profileID)
         }
         .sheet(isPresented: $showsBalanceEditor) { APICreditBalanceEditor(model: model) }
         .sheet(isPresented: $showsCustomPeriod) { APIPeriodEditor(model: model) }
@@ -217,9 +221,14 @@ struct APIUsageView: View {
             }
             Spacer()
             if model.isRefreshing { ProgressView().controlSize(.small); Text("同步中").font(.caption).foregroundStyle(.secondary) }
-            Button { model.refresh() } label: { Label("刷新", systemImage: "arrow.clockwise") }
+            Button { model.refreshAll() } label: { Label("刷新", systemImage: "arrow.clockwise") }
                 .disabled(model.isRefreshing || model.isDemo || model.organization == nil)
             Menu {
+                Button("授权读取当前账号密钥") { model.authorizeCredential() }
+                Button("网页登录同步额度") { openWebBilling() }
+                if model.configuration.webBilling[model.organization?.id ?? ""]?.enabled == true {
+                    Button("暂停网页自动同步") { model.pauseWebBilling() }
+                }
                 Button("添加组织") { organizationEditor = OrganizationEditorTarget(organization: nil) }
                 if model.organization != nil {
                     Button("组织与连接设置") { organizationEditor = OrganizationEditorTarget(organization: model.organization) }
@@ -235,12 +244,18 @@ struct APIUsageView: View {
     private var overview: some View {
         VStack(alignment: .leading, spacing: 20) {
             balanceCard
+            if let id = model.organization?.id { APIWebBillingStatusView(browser: model.webBilling, organizationID: id) }
             periodBar
             if model.isRefreshing {
                 notice("正在载入所选周期，下方保留上次结果。", icon: "arrow.triangle.2.circlepath", color: accent)
             }
             if let error = model.snapshot?.cycle.error ?? model.snapshot?.usage.error {
-                notice("同步未完成 · \(error) 缓存以所示日期为准。", icon: "exclamationmark.triangle", color: .orange)
+                HStack {
+                    notice("同步未完成 · \(error) 缓存以所示日期为准。", icon: "exclamationmark.triangle", color: .orange)
+                    if error.contains("密钥需要本机授权") {
+                        Button("授权密钥") { model.authorizeCredential() }.fixedSize()
+                    }
+                }
             } else if !model.isRefreshing, model.snapshot?.cycle.isStale(now: Date()) == true {
                 notice("账单缓存已超过 30 分钟，请刷新后查看最新结果。", icon: "clock", color: .orange)
             }
@@ -398,10 +413,10 @@ struct APIUsageView: View {
                 Image(systemName: "wallet.pass").font(.system(size: 24)).foregroundStyle(accent)
             }.frame(width: 62, height: 62).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 6) {
-                Text(balance?.isInitialGrantOnly == true ? "已知初始赠额" : "API 总额度").font(.caption).foregroundStyle(.secondary)
+                Text(balance?.isInitialGrantOnly == true ? "已知初始赠额" : (balance?.webSynced == true ? "有效批次总额度" : "API 总额度")).font(.caption).foregroundStyle(.secondary)
                 Text(balance?.totalCredits.map { APIUsageFormat.compactMoney($0, currency: balance!.currency) } ?? "待核实")
                     .font(.system(size: 28, weight: .semibold, design: .rounded)).monospacedDigit()
-                Text(balance?.isInitialGrantOnly == true ? "初始金额 · 非当前余额" : "核对记录 · 不随周期变化").font(.caption).foregroundStyle(.secondary)
+                Text(balance?.isInitialGrantOnly == true ? "初始金额 · 非当前余额" : (balance?.webSynced == true ? "网页自动同步" : "核对记录 · 不随周期变化")).font(.caption).foregroundStyle(.secondary)
             }
             Divider().frame(height: 58)
             VStack(alignment: .leading, spacing: 6) {
@@ -409,19 +424,28 @@ struct APIUsageView: View {
                 Text(balance?.remainingCredits.map { APIUsageFormat.compactMoney($0, currency: balance!.currency) } ?? "待核实")
                     .font(.system(size: 28, weight: .semibold, design: .rounded)).monospacedDigit().foregroundStyle(accent)
                 if let balance {
-                    Text("\(balance.verifiedAt.formatted(date: .numeric, time: .shortened)) 核对")
+                    Text("\(balance.verifiedAt.formatted(date: .numeric, time: .shortened)) \(balance.webSynced == true ? "同步" : "核对")")
                         .font(.caption).foregroundStyle(.secondary)
                 } else { Text("以官方 Credit grants 为准").font(.caption).foregroundStyle(.secondary) }
             }
             Spacer(minLength: 0)
             VStack(alignment: .trailing, spacing: 10) {
-                Button("核对额度") { showsBalanceEditor = true }.buttonStyle(.bordered)
+                Button("网页登录同步") { openWebBilling() }.buttonStyle(.borderedProminent).disabled(model.isDemo)
+                Button("手动核对") { showsBalanceEditor = true }.buttonStyle(.link).font(.caption)
                 Link("查看官方赠额 ↗", destination: URL(string: "https://platform.openai.com/settings/organization/billing/credit-grants")!)
                     .font(.caption)
             }
         }.padding(22)
             .background(accent.opacity(0.055), in: RoundedRectangle(cornerRadius: 16))
             .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(accent.opacity(0.12), lineWidth: 1))
+    }
+
+    private func openWebBilling() {
+        guard let organization = model.organization else { return }
+        do {
+            let profileID = try model.prepareWebBilling(organizationID: organization.id)
+            webEditor = APIWebEditorTarget(organization: organization, profileID: profileID)
+        } catch { model.message = error.localizedDescription }
     }
 
     private var creditsPage: some View {
@@ -785,6 +809,12 @@ extension APIUsageFormat {
         return "\(formatter.string(from: range.start)) – \(formatter.string(from: range.end)) UTC"
     }
 }
+private struct APIWebEditorTarget: Identifiable {
+    var id: String { organization.id }
+    let organization: APIOrganization
+    let profileID: UUID
+}
+
 private struct OrganizationEditorTarget: Identifiable {
     let id = UUID()
     var organization: APIOrganization?
